@@ -54,24 +54,51 @@ def sanitize_content(text: str) -> str:
 
 
 def gen_cover(title: str, post_dir: Path, with_title: bool = False) -> Path:
-    """生成封面图片
+    """生成封面图片（带头像）
     
     Args:
         title: 标题文字
         post_dir: 输出目录
-        with_title: 是否在封面上显示标题（默认否，让字幕作为唯一文字）
+        with_title: 是否在封面上显示标题
     """
-    from PIL import Image
+    from PIL import Image, ImageDraw, ImageFilter
+    
     output = post_dir / "cover.png"
+    width, height = 1080, 1920
     
-    if with_title:
-        from gen_cover import gen_cover as _gen_cover
-        _gen_cover(title, output)
-    else:
-        # 纯黑背景，不带文字
-        img = Image.new("RGB", (1080, 1920), color=(0, 0, 0))
-        img.save(str(output))
+    # 创建渐变背景（深蓝到深紫）
+    img = Image.new("RGB", (width, height))
+    draw = ImageDraw.Draw(img)
     
+    for y in range(height):
+        # 从深蓝 (20, 20, 60) 到深紫 (40, 20, 60)
+        r = int(20 + (40 - 20) * y / height)
+        g = 20
+        b = int(60 + (80 - 60) * y / height)
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
+    
+    # 加载头像
+    avatar_path = Path(__file__).parent / "assets" / "avatar.png"
+    if avatar_path.exists():
+        avatar = Image.open(avatar_path)
+        
+        # 调整头像大小（居中显示）
+        avatar_size = 400
+        avatar = avatar.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+        
+        # 创建圆形蒙版
+        mask = Image.new("L", (avatar_size, avatar_size), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
+        
+        # 粘贴头像到中心偏上位置
+        avatar_x = (width - avatar_size) // 2
+        avatar_y = height // 3 - avatar_size // 2
+        
+        # 使用蒙版粘贴（圆形头像）
+        img.paste(avatar, (avatar_x, avatar_y), mask)
+    
+    img.save(str(output))
     return output
 
 
