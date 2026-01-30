@@ -103,7 +103,13 @@ def gen_subtitles_whisper(audio: Path, output: Path, max_chars: int = 20) -> boo
     
     # 加载模型
     model = WhisperModel("base", device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(str(audio), language="zh", word_timestamps=True)
+    # 用简体中文 prompt 引导输出简体
+    segments, _ = model.transcribe(
+        str(audio), 
+        language="zh", 
+        word_timestamps=True,
+        initial_prompt="以下是普通话的句子，使用简体中文。"
+    )
     
     # 收集所有词
     words = []
