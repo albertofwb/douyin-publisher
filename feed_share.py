@@ -73,8 +73,47 @@ def gen_audio(text: str, output: Path, voice: str = DEFAULT_VOICE) -> bool:
     return True
 
 
-def gen_video(image: Path, audio: Path, output: Path) -> bool:
-    """合成视频（静态图片 + 音频）"""
+def gen_subtitles(text: str, duration: float, output: Path) -> Path:
+    """生成 SRT 字幕文件
+    
+    简单策略：按句子分割，均匀分配时间
+    """
+    import re
+    
+    # 按句子分割（中文句号、问号、感叹号、换行）
+    sentences = re.split(r'[。！？\n]+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    if not sentences:
+        sentences = [text]
+    
+    # 计算每句时间
+    time_per_sentence = duration / len(sentences)
+    
+    srt_content = []
+    for i, sentence in enumerate(sentences):
+        start_time = i * time_per_sentence
+        end_time = (i + 1) * time_per_sentence - 0.1  # 留一点间隔
+        
+        # 格式化时间 HH:MM:SS,mmm
+        def format_time(seconds):
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = int(seconds % 60)
+            ms = int((seconds % 1) * 1000)
+            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+        
+        srt_content.append(f"{i + 1}")
+        srt_content.append(f"{format_time(start_time)} --> {format_time(end_time)}")
+        srt_content.append(sentence)
+        srt_content.append("")
+    
+    output.write_text('\n'.join(srt_content), encoding='utf-8')
+    return output
+
+
+def gen_video(image: Path, audio: Path, output: Path, subtitles: Path = None) -> bool:
+    """合成视频（静态图片 + 音频 + 可选字幕）"""
     # 获取音频时长
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -87,12 +126,31 @@ def gen_video(image: Path, audio: Path, output: Path) -> bool:
     
     duration = float(probe.stdout.strip())
     
-    # 生成视频：图片循环 + 音频
-    result = subprocess.run([
+    # 构建 ffmpeg 命令
+    cmd = [
         "ffmpeg", "-y",
         "-loop", "1",
         "-i", str(image),
         "-i", str(audio),
+    ]
+    
+    # 如果有字幕，添加字幕滤镜
+    if subtitles and subtitles.exists():
+        # 字幕样式：居中底部，白色大字，黑色描边
+        subtitle_filter = (
+            f"subtitles={subtitles}:force_style='"
+            f"FontSize=42,"
+            f"FontName=WenQuanYi Zen Hei,"
+            f"PrimaryColour=&HFFFFFF,"
+            f"OutlineColour=&H000000,"
+            f"Outline=2,"
+            f"Shadow=1,"
+            f"Alignment=2,"
+            f"MarginV=80'"
+        )
+        cmd.extend(["-vf", subtitle_filter])
+    
+    cmd.extend([
         "-c:v", "libx264",
         "-tune", "stillimage",
         "-c:a", "aac",
@@ -101,13 +159,27 @@ def gen_video(image: Path, audio: Path, output: Path) -> bool:
         "-shortest",
         "-t", str(duration),
         str(output)
-    ], capture_output=True, text=True)
+    ])
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
     
     if result.returncode != 0:
         print(f"❌ 视频生成失败: {result.stderr}", file=sys.stderr)
         return False
     
     return True
+
+
+def get_audio_duration(audio: Path) -> float:
+    """获取音频时长"""
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(audio)],
+        capture_output=True, text=True
+    )
+    if probe.returncode == 0:
+        return float(probe.stdout.strip())
+    return 0.0
 
 
 def post_video(video: Path, title: str, description: str = "", hotspot: str = "", debug: bool = False) -> bool:
@@ -332,14 +404,21 @@ def main():
         sys.exit(1)
     print(f"   音频: {audio}")
     
-    # 3. 合成视频
+    # 3. 生成字幕
+    print("📝 生成字幕...")
+    duration = get_audio_duration(audio)
+    subtitles = post_dir / "subtitles.srt"
+    gen_subtitles(content, duration, subtitles)
+    print(f"   字幕: {subtitles}")
+    
+    # 4. 合成视频（带字幕）
     print("🎬 合成视频...")
     video = post_dir / "video.mp4"
-    if not gen_video(cover, audio, video):
+    if not gen_video(cover, audio, video, subtitles):
         sys.exit(1)
     print(f"   视频: {video}")
     
-    # 4. 发布（如果指定）
+    # 5. 发布（如果指定）
     if args.post:
         print("\n📤 开始发布...")
         success = post_video(video, title, content[:100], args.hotspot, debug=args.debug)
