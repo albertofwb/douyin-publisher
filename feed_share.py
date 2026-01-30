@@ -75,24 +75,92 @@ def gen_cover(title: str, post_dir: Path, with_title: bool = False) -> Path:
     return output
 
 
-def gen_audio(text: str, output: Path, subtitles: Path = None, voice: str = DEFAULT_VOICE) -> bool:
-    """生成 TTS 音频（可选同时生成精确时间戳的字幕）"""
+def gen_audio(text: str, output: Path, voice: str = DEFAULT_VOICE) -> bool:
+    """生成 TTS 音频"""
     cmd = ["edge-tts", "--text", text, "--voice", voice, "--write-media", str(output)]
-    
-    # 同时生成字幕（VTT 格式，后面转 SRT）
-    if subtitles:
-        vtt_path = subtitles.with_suffix('.vtt')
-        cmd.extend(["--write-subtitles", str(vtt_path)])
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"❌ TTS 失败: {result.stderr}", file=sys.stderr)
         return False
     
-    # 转换 VTT 到 SRT
-    if subtitles and vtt_path.exists():
-        vtt_to_srt(vtt_path, subtitles)
+    return True
+
+
+def gen_subtitles_whisper(audio: Path, output: Path, max_chars: int = 20) -> bool:
+    """用 Whisper 生成精确字级字幕
     
+    Args:
+        audio: 音频文件路径
+        output: 输出 SRT 文件路径
+        max_chars: 每行最大字符数
+    """
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        print("⚠️ faster-whisper 未安装，回退到 edge-tts 字幕", file=sys.stderr)
+        return False
+    
+    # 加载模型
+    model = WhisperModel("base", device="cpu", compute_type="int8")
+    segments, _ = model.transcribe(str(audio), language="zh", word_timestamps=True)
+    
+    # 收集所有词
+    words = []
+    for seg in segments:
+        if seg.words:
+            for w in seg.words:
+                words.append({
+                    'text': w.word.strip(),
+                    'start': w.start,
+                    'end': w.end
+                })
+    
+    if not words:
+        return False
+    
+    # 按字符数分组
+    def format_time(seconds: float) -> str:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        ms = int((seconds % 1) * 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    
+    srt_blocks = []
+    block_num = 1
+    current_text = ""
+    current_start = None
+    current_end = None
+    
+    for word in words:
+        if not word['text']:
+            continue
+            
+        if current_start is None:
+            current_start = word['start']
+        
+        # 检查是否需要换行
+        if len(current_text) + len(word['text']) > max_chars and current_text:
+            # 保存当前行
+            srt_blocks.append(
+                f"{block_num}\n{format_time(current_start)} --> {format_time(current_end)}\n{current_text}"
+            )
+            block_num += 1
+            current_text = word['text']
+            current_start = word['start']
+        else:
+            current_text += word['text']
+        
+        current_end = word['end']
+    
+    # 保存最后一行
+    if current_text:
+        srt_blocks.append(
+            f"{block_num}\n{format_time(current_start)} --> {format_time(current_end)}\n{current_text}"
+        )
+    
+    output.write_text('\n\n'.join(srt_blocks), encoding='utf-8')
     return True
 
 
@@ -538,13 +606,25 @@ def main():
     cover = gen_cover(title, post_dir)
     print(f"   封面: {cover}")
     
-    # 2. 生成音频和字幕（edge-tts 精确同步）
-    print("🎤 生成语音+字幕...")
+    # 2. 生成音频
+    print("🎤 生成语音...")
     audio = post_dir / "audio.mp3"
-    subtitles = post_dir / "subtitles.srt"
-    if not gen_audio(content, audio, subtitles, args.voice):
+    if not gen_audio(content, audio, args.voice):
         sys.exit(1)
     print(f"   音频: {audio}")
+    
+    # 3. 用 Whisper 生成字级字幕
+    print("📝 生成字幕 (Whisper)...")
+    subtitles = post_dir / "subtitles.srt"
+    if not gen_subtitles_whisper(audio, subtitles):
+        print("   ⚠️ Whisper 失败，使用备用方案")
+        # 备用：用 edge-tts 的字幕
+        vtt = post_dir / "subtitles.vtt"
+        subprocess.run(["edge-tts", "--text", content, "--voice", args.voice, 
+                       "--write-media", "/dev/null", "--write-subtitles", str(vtt)],
+                      capture_output=True)
+        if vtt.exists():
+            vtt_to_srt(vtt, subtitles)
     print(f"   字幕: {subtitles}")
     
     # 4. 合成视频（带字幕）
