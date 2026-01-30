@@ -1,0 +1,15 @@
+[project]
+name = "postdouyin"
+version = "0.1.0"
+description = "Post images to Douyin via Chrome CDP connection"
+requires-python = ">=3.10"
+dependencies = [
+    "pillow>=12.1.0",
+    "playwright>=1.40.0",
+]
+
+[project.scripts]
+postdouyin = "postdouyin:main"
+
+[dependency-groups]
+dev = []
