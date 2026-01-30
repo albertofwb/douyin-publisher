@@ -96,8 +96,14 @@ def gen_audio(text: str, output: Path, subtitles: Path = None, voice: str = DEFA
     return True
 
 
-def vtt_to_srt(vtt_path: Path, srt_path: Path):
-    """将 VTT 字幕转换为 SRT 格式"""
+def vtt_to_srt(vtt_path: Path, srt_path: Path, max_chars_per_line: int = 20):
+    """将 VTT 字幕转换为 SRT 格式，自动分行长文本
+    
+    Args:
+        vtt_path: VTT 字幕文件路径
+        srt_path: 输出 SRT 文件路径
+        max_chars_per_line: 每行最大字符数
+    """
     import re
     
     content = vtt_path.read_text(encoding='utf-8')
@@ -106,25 +112,64 @@ def vtt_to_srt(vtt_path: Path, srt_path: Path):
     lines = content.split('\n')
     lines = [l for l in lines if l.strip() and not l.startswith('WEBVTT')]
     
+    def parse_time(time_str: str) -> float:
+        """解析时间字符串为秒数"""
+        time_str = time_str.replace(',', '.')
+        parts = time_str.split(':')
+        return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+    
+    def format_time(seconds: float) -> str:
+        """格式化秒数为 SRT 时间格式"""
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        ms = int((seconds % 1) * 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    
+    def split_text(text: str, max_chars: int) -> list[str]:
+        """将长文本分割成多行"""
+        if len(text) <= max_chars:
+            return [text]
+        
+        # 按标点分割优先
+        segments = []
+        current = ""
+        for char in text:
+            current += char
+            if char in '，。！？、；：' and len(current) >= max_chars // 2:
+                segments.append(current)
+                current = ""
+        if current:
+            segments.append(current)
+        
+        # 如果还是太长，强制分割
+        result = []
+        for seg in segments:
+            while len(seg) > max_chars:
+                result.append(seg[:max_chars])
+                seg = seg[max_chars:]
+            if seg:
+                result.append(seg)
+        
+        return result if result else [text]
+    
     # 解析字幕块
-    srt_blocks = []
+    raw_subtitles = []
     i = 0
-    block_num = 1
     
     while i < len(lines):
         line = lines[i].strip()
         
-        # 跳过数字行（VTT 可能有也可能没有）
         if line.isdigit():
             i += 1
             continue
         
-        # 时间行
         if '-->' in line:
-            # 转换时间格式 00:00:00.000 -> 00:00:00,000
             time_line = re.sub(r'(\d{2}:\d{2}:\d{2})\.(\d{3})', r'\1,\2', line)
+            times = time_line.split(' --> ')
+            start_time = parse_time(times[0])
+            end_time = parse_time(times[1])
             
-            # 收集文本行
             text_lines = []
             i += 1
             while i < len(lines) and '-->' not in lines[i] and not lines[i].strip().isdigit():
@@ -133,10 +178,30 @@ def vtt_to_srt(vtt_path: Path, srt_path: Path):
                 i += 1
             
             if text_lines:
-                srt_blocks.append(f"{block_num}\n{time_line}\n" + '\n'.join(text_lines))
-                block_num += 1
+                text = ' '.join(text_lines)
+                raw_subtitles.append({
+                    'start': start_time,
+                    'end': end_time,
+                    'text': text
+                })
         else:
             i += 1
+    
+    # 分割长字幕
+    srt_blocks = []
+    block_num = 1
+    
+    for sub in raw_subtitles:
+        text_parts = split_text(sub['text'], max_chars_per_line)
+        duration = sub['end'] - sub['start']
+        time_per_part = duration / len(text_parts)
+        
+        for j, part in enumerate(text_parts):
+            start = sub['start'] + j * time_per_part
+            end = sub['start'] + (j + 1) * time_per_part - 0.05  # 小间隔
+            
+            srt_blocks.append(f"{block_num}\n{format_time(start)} --> {format_time(end)}\n{part}")
+            block_num += 1
     
     srt_path.write_text('\n\n'.join(srt_blocks), encoding='utf-8')
 
