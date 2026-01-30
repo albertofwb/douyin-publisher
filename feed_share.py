@@ -26,8 +26,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 DATA_DIR = SCRIPT_DIR / "data"
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 
-# 视频发布 URL
-DOUYIN_VIDEO_URL = "https://creator.douyin.com/creator-micro/content/upload?enter_from=publish_page"
+# 视频发布 URL（发布视频 tab）
+DOUYIN_VIDEO_URL = "https://creator.douyin.com/creator-micro/content/upload"
 
 
 def sanitize_dirname(text: str, max_len: int = 40) -> str:
@@ -110,7 +110,7 @@ def gen_video(image: Path, audio: Path, output: Path) -> bool:
     return True
 
 
-def post_video(video: Path, title: str, description: str = "", hotspot: str = "") -> bool:
+def post_video(video: Path, title: str, description: str = "", hotspot: str = "", debug: bool = False) -> bool:
     """发布视频到抖音"""
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
     from chrome_utils import CDP_URL, ensure_chrome_cdp
@@ -130,30 +130,70 @@ def post_video(video: Path, title: str, description: str = "", hotspot: str = ""
         try:
             print("📍 打开抖音创作者平台...")
             page.goto(DOUYIN_VIDEO_URL, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(5)
+            time.sleep(3)
 
-            # 等待上传区域
+            # 确保在「发布视频」tab
             try:
-                page.wait_for_selector('text=点击上传', timeout=15000)
-            except PlaywrightTimeout:
-                print("❌ 请先登录抖音创作者平台", file=sys.stderr)
-                return False
+                video_tab = page.locator('text=发布视频').first
+                if video_tab.count() > 0:
+                    video_tab.click()
+                    time.sleep(1)
+            except:
+                pass
 
-            # 上传视频
+            # 等待上传按钮出现
+            try:
+                page.wait_for_selector('text=上传视频', timeout=15000)
+            except PlaywrightTimeout:
+                # 尝试其他选择器
+                try:
+                    page.wait_for_selector('text=点击上传', timeout=5000)
+                except PlaywrightTimeout:
+                    print("❌ 请先登录抖音创作者平台", file=sys.stderr)
+                    return False
+
+            # 上传视频 - 找到文件输入框
             print(f"📤 上传视频: {video.name}")
-            upload_area = page.locator('text=点击上传').first
-            with page.expect_file_chooser() as fc:
-                upload_area.click()
-            fc.value.set_files(str(video))
             
-            # 等待上传完成（可能需要较长时间）
+            # 方法1: 直接找 file input
+            file_input = page.locator('input[type="file"][accept*="video"]')
+            if file_input.count() > 0:
+                file_input.set_input_files(str(video))
+            else:
+                # 方法2: 点击上传按钮触发 file chooser
+                upload_btn = page.locator('text=上传视频').first
+                if upload_btn.count() == 0:
+                    upload_btn = page.locator('text=点击上传').first
+                
+                with page.expect_file_chooser() as fc:
+                    upload_btn.click()
+                fc.value.set_files(str(video))
+            
+            # 等待上传完成
             print("⏳ 等待上传...")
-            time.sleep(10)
             
-            # 等待标题输入框出现（表示上传完成）
-            try:
-                page.wait_for_selector('[placeholder*="标题"]', timeout=120000)
-            except PlaywrightTimeout:
+            # 等待进度条消失或标题输入框出现
+            max_wait = 180  # 最多等 3 分钟
+            waited = 0
+            while waited < max_wait:
+                # 检查是否有标题输入框（上传完成的标志）
+                title_input = page.locator('[placeholder*="标题"], [placeholder*="作品标题"]')
+                if title_input.count() > 0 and title_input.first.is_visible():
+                    print("✅ 上传完成")
+                    break
+                
+                # 检查是否有错误提示
+                error = page.locator('text=上传失败')
+                if error.count() > 0 and error.first.is_visible():
+                    print("❌ 上传失败", file=sys.stderr)
+                    return False
+                
+                time.sleep(2)
+                waited += 2
+                if waited % 10 == 0:
+                    print(f"   已等待 {waited}s...")
+            
+            if waited >= max_wait:
                 print("❌ 上传超时", file=sys.stderr)
                 return False
             
@@ -161,45 +201,71 @@ def post_video(video: Path, title: str, description: str = "", hotspot: str = ""
 
             # 填写标题
             if title:
-                print(f"✍️ 填写标题: {title[:20]}...")
-                title_input = page.locator('[placeholder*="标题"]').first
-                title_input.fill(title)
+                print(f"✍️ 填写标题: {title[:30]}...")
+                title_input = page.locator('[placeholder*="标题"], [placeholder*="作品标题"]').first
+                title_input.fill(title[:30])  # 抖音标题限制
                 time.sleep(0.5)
 
-            # 填写描述
+            # 填写描述（在编辑框中）
             if description:
                 print("✍️ 填写描述...")
+                # 抖音的描述在 contenteditable div 中
                 editor = page.locator('[contenteditable="true"]').first
                 if editor.count() > 0:
                     editor.click()
-                    page.keyboard.type(description)
+                    # 清空现有内容
+                    page.keyboard.press("Control+a")
+                    page.keyboard.press("Delete")
+                    time.sleep(0.3)
+                    # 输入新内容（限制长度）
+                    page.keyboard.type(description[:500])
                     time.sleep(0.5)
 
             # 关联热点
             if hotspot:
                 try:
                     print(f"🔥 关联热点: {hotspot}")
-                    hotspot_btn = page.locator('text=点击输入热点词').first
-                    hotspot_btn.click()
-                    time.sleep(1)
-                    page.keyboard.type(hotspot)
-                    time.sleep(2)
-                    page.locator('[class*="option"]').first.click()
-                    time.sleep(1)
+                    hotspot_input = page.locator('text=点击输入热点词, text=添加热点')
+                    if hotspot_input.count() > 0:
+                        hotspot_input.first.click()
+                        time.sleep(1)
+                        page.keyboard.type(hotspot)
+                        time.sleep(2)
+                        # 选择第一个热点选项
+                        option = page.locator('[class*="option"], [class*="item"]').first
+                        if option.count() > 0:
+                            option.click()
+                            time.sleep(1)
                 except Exception as e:
                     print(f"⚠️ 热点关联失败: {e}")
 
+            if debug:
+                print("🔍 调试模式 - 按 Enter 继续发布...")
+                input()
+
             # 发布
             print("🚀 发布中...")
-            publish_btn = page.locator('button:has-text("发布")').first
-            publish_btn.click(timeout=10000)
+            # 找发布按钮（不是高清发布）
+            publish_btn = page.locator('button:has-text("发布"):not(:has-text("高清"))')
+            if publish_btn.count() == 0:
+                publish_btn = page.locator('button:has-text("发布")')
+            
+            publish_btn.first.click(timeout=10000)
             time.sleep(5)
             
-            print("✅ 发布成功！")
+            # 检查是否发布成功
+            success_indicator = page.locator('text=发布成功, text=作品已发布')
+            if success_indicator.count() > 0:
+                print("✅ 发布成功！")
+            else:
+                print("✅ 已点击发布（请检查是否成功）")
+            
             return True
 
         except Exception as e:
             print(f"❌ 发布失败: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
             return False
         finally:
             page.close()
@@ -224,6 +290,7 @@ def main():
     parser.add_argument("--hotspot", help="关联热点话题")
     parser.add_argument("--voice", default=DEFAULT_VOICE, help="TTS 语音")
     parser.add_argument("--no-sanitize", action="store_true", help="不过滤敏感词")
+    parser.add_argument("--debug", action="store_true", help="调试模式（发布前暂停）")
     
     args = parser.parse_args()
     
@@ -275,7 +342,7 @@ def main():
     # 4. 发布（如果指定）
     if args.post:
         print("\n📤 开始发布...")
-        success = post_video(video, title, content[:100], args.hotspot)
+        success = post_video(video, title, content[:100], args.hotspot, debug=args.debug)
         sys.exit(0 if success else 1)
     else:
         print(f"\n✅ 视频已生成: {video}")
