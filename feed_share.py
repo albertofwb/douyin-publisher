@@ -210,19 +210,19 @@ def gen_video(image: Path, audio: Path, output: Path, subtitles: Path = None) ->
         temp_srt = Path(tempfile.gettempdir()) / "temp_subtitles.srt"
         shutil.copy(subtitles, temp_srt)
         
-        # 字幕样式：居中底部，白色大字，黑色描边
+        # 字幕样式：居中，白色大字，黑色描边
         # 注意：路径中的特殊字符需要转义
         srt_path_escaped = str(temp_srt).replace('\\', '/').replace(':', '\\:')
         subtitle_filter = (
             f"subtitles={srt_path_escaped}:force_style='"
-            f"FontSize=42,"
-            f"FontName=WenQuanYi Zen Hei,"
+            f"FontSize=48,"
+            f"FontName=Noto Sans CJK SC,"
             f"PrimaryColour=&HFFFFFF,"
             f"OutlineColour=&H000000,"
-            f"Outline=2,"
+            f"Outline=3,"
             f"Shadow=1,"
-            f"Alignment=2,"
-            f"MarginV=80'"
+            f"Alignment=5,"  # 5=居中（屏幕正中央）
+            f"MarginL=0,MarginR=0,MarginV=0'"  # 清除所有边距
         )
         cmd.extend(["-vf", subtitle_filter])
     
