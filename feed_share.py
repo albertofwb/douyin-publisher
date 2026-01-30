@@ -53,24 +53,92 @@ def sanitize_content(text: str) -> str:
     return text
 
 
-def gen_cover(title: str, post_dir: Path) -> Path:
-    """生成封面图片"""
-    from gen_cover import gen_cover as _gen_cover
+def gen_cover(title: str, post_dir: Path, with_title: bool = False) -> Path:
+    """生成封面图片
+    
+    Args:
+        title: 标题文字
+        post_dir: 输出目录
+        with_title: 是否在封面上显示标题（默认否，让字幕作为唯一文字）
+    """
+    from PIL import Image
     output = post_dir / "cover.png"
-    _gen_cover(title, output)
+    
+    if with_title:
+        from gen_cover import gen_cover as _gen_cover
+        _gen_cover(title, output)
+    else:
+        # 纯黑背景，不带文字
+        img = Image.new("RGB", (1080, 1920), color=(0, 0, 0))
+        img.save(str(output))
+    
     return output
 
 
-def gen_audio(text: str, output: Path, voice: str = DEFAULT_VOICE) -> bool:
-    """生成 TTS 音频"""
-    result = subprocess.run(
-        ["edge-tts", "--text", text, "--voice", voice, "--write-media", str(output)],
-        capture_output=True, text=True
-    )
+def gen_audio(text: str, output: Path, subtitles: Path = None, voice: str = DEFAULT_VOICE) -> bool:
+    """生成 TTS 音频（可选同时生成精确时间戳的字幕）"""
+    cmd = ["edge-tts", "--text", text, "--voice", voice, "--write-media", str(output)]
+    
+    # 同时生成字幕（VTT 格式，后面转 SRT）
+    if subtitles:
+        vtt_path = subtitles.with_suffix('.vtt')
+        cmd.extend(["--write-subtitles", str(vtt_path)])
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"❌ TTS 失败: {result.stderr}", file=sys.stderr)
         return False
+    
+    # 转换 VTT 到 SRT
+    if subtitles and vtt_path.exists():
+        vtt_to_srt(vtt_path, subtitles)
+    
     return True
+
+
+def vtt_to_srt(vtt_path: Path, srt_path: Path):
+    """将 VTT 字幕转换为 SRT 格式"""
+    import re
+    
+    content = vtt_path.read_text(encoding='utf-8')
+    
+    # 移除 VTT 头部和空行
+    lines = content.split('\n')
+    lines = [l for l in lines if l.strip() and not l.startswith('WEBVTT')]
+    
+    # 解析字幕块
+    srt_blocks = []
+    i = 0
+    block_num = 1
+    
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        # 跳过数字行（VTT 可能有也可能没有）
+        if line.isdigit():
+            i += 1
+            continue
+        
+        # 时间行
+        if '-->' in line:
+            # 转换时间格式 00:00:00.000 -> 00:00:00,000
+            time_line = re.sub(r'(\d{2}:\d{2}:\d{2})\.(\d{3})', r'\1,\2', line)
+            
+            # 收集文本行
+            text_lines = []
+            i += 1
+            while i < len(lines) and '-->' not in lines[i] and not lines[i].strip().isdigit():
+                if lines[i].strip():
+                    text_lines.append(lines[i].strip())
+                i += 1
+            
+            if text_lines:
+                srt_blocks.append(f"{block_num}\n{time_line}\n" + '\n'.join(text_lines))
+                block_num += 1
+        else:
+            i += 1
+    
+    srt_path.write_text('\n\n'.join(srt_blocks), encoding='utf-8')
 
 
 def gen_subtitles(text: str, duration: float, output: Path) -> Path:
@@ -136,9 +204,17 @@ def gen_video(image: Path, audio: Path, output: Path, subtitles: Path = None) ->
     
     # 如果有字幕，添加字幕滤镜
     if subtitles and subtitles.exists():
+        # 复制字幕到临时文件（避免中文路径问题）
+        import shutil
+        import tempfile
+        temp_srt = Path(tempfile.gettempdir()) / "temp_subtitles.srt"
+        shutil.copy(subtitles, temp_srt)
+        
         # 字幕样式：居中底部，白色大字，黑色描边
+        # 注意：路径中的特殊字符需要转义
+        srt_path_escaped = str(temp_srt).replace('\\', '/').replace(':', '\\:')
         subtitle_filter = (
-            f"subtitles={subtitles}:force_style='"
+            f"subtitles={srt_path_escaped}:force_style='"
             f"FontSize=42,"
             f"FontName=WenQuanYi Zen Hei,"
             f"PrimaryColour=&HFFFFFF,"
@@ -397,18 +473,13 @@ def main():
     cover = gen_cover(title, post_dir)
     print(f"   封面: {cover}")
     
-    # 2. 生成音频
-    print("🎤 生成语音...")
+    # 2. 生成音频和字幕（edge-tts 精确同步）
+    print("🎤 生成语音+字幕...")
     audio = post_dir / "audio.mp3"
-    if not gen_audio(content, audio, args.voice):
+    subtitles = post_dir / "subtitles.srt"
+    if not gen_audio(content, audio, subtitles, args.voice):
         sys.exit(1)
     print(f"   音频: {audio}")
-    
-    # 3. 生成字幕
-    print("📝 生成字幕...")
-    duration = get_audio_duration(audio)
-    subtitles = post_dir / "subtitles.srt"
-    gen_subtitles(content, duration, subtitles)
     print(f"   字幕: {subtitles}")
     
     # 4. 合成视频（带字幕）
