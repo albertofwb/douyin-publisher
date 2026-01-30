@@ -80,7 +80,7 @@ def ensure_chrome_cdp() -> bool:
     time.sleep(2)
 
     # Start Chrome with CDP using dedicated profile
-    chrome_data_dir = Path(__file__).parent / ".chrome"
+    chrome_data_dir = Path.home() / ".chrome_bot"
     subprocess.Popen(
         ["google-chrome", f"--remote-debugging-port={CDP_PORT}", f"--user-data-dir={chrome_data_dir}"],
         stdout=subprocess.DEVNULL,

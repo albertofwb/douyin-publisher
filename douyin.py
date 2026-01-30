@@ -2,13 +2,10 @@
 """抖音发布工具 - 封面生成、TTS音乐、发布"""
 
 import argparse
-import json
 import random
-import re
 import subprocess
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -18,55 +15,9 @@ DOUYIN_POST_URL = "https://creator.douyin.com/creator-micro/content/post/image?e
 
 
 # === Cover ===
-def sanitize_dirname(text: str, max_len: int = 50) -> str:
-    text = text.split("\n")[0].strip()
-    text = re.sub(r'[<>:"/\\|?*]', '', text)
-    return text[:max_len]
-
-
 def cmd_cover(args):
-    from PIL import Image, ImageDraw, ImageFont
-
-    text = args.text.replace("\\n", "\n")
-
-    # Create post directory (no spaces)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dirname = f"{timestamp}_{sanitize_dirname(text)}"
-    post_dir = DATA_DIR / dirname
-    post_dir.mkdir(parents=True, exist_ok=True)
-    output = post_dir / "cover.png"
-
-    # Save post.json
-    lines = text.split("\n")
-    title = lines[0].strip() if lines else ""
-    body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
-    with open(post_dir / "post.json", "w", encoding="utf-8") as f:
-        json.dump({"title": title, "body": body, "cover": "cover.png"}, f, ensure_ascii=False, indent=2)
-
-    # Generate image
-    img = Image.new("RGB", (1080, 1920), color="white")
-    draw = ImageDraw.Draw(img)
-
-    font = None
-    for fp in ["/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"]:
-        if Path(fp).exists():
-            font = ImageFont.truetype(fp, 80)
-            break
-    if not font:
-        font = ImageFont.load_default()
-
-    lines = text.split("\n")
-    line_heights = [draw.textbbox((0, 0), l, font=font)[3] for l in lines]
-    total_h = sum(line_heights) + (len(lines) - 1) * 20
-    y = (1920 - total_h) // 2
-
-    for i, line in enumerate(lines):
-        bbox = draw.textbbox((0, 0), line, font=font)
-        x = (1080 - bbox[2]) // 2
-        draw.text((x, y), line, fill="black", font=font)
-        y += line_heights[i] + 20
-
-    img.save(str(output))
+    from gen_cover import gen_cover
+    output = gen_cover(args.text)
     print(f"封面: {output}")
 
 
@@ -150,26 +101,28 @@ def cmd_post(args):
             if args.music:
                 try:
                     page.locator('text=选择音乐').last.click()
-                    time.sleep(2)
+                    time.sleep(3)
                     panel = page.locator('[class*="sidesheet"]').first
                     idx = random.randint(0, 4)
                     # Hover on the music item to reveal button
                     use_btn = panel.locator('text=使用').nth(idx)
                     box = use_btn.bounding_box()
                     if box:
-                        page.mouse.move(box['x'] + box['width']/2, box['y'] + box['height']/2)
+                        cx, cy = box['x'] + box['width']/2, box['y'] + box['height']/2
+                        page.mouse.move(cx - 20, cy)
+                        time.sleep(0.3)
+                        page.mouse.move(cx, cy)
                         time.sleep(0.5)
-                        page.mouse.move(box['x'] + box['width']/2 + 5, box['y'] + box['height']/2)
-                        time.sleep(random.uniform(1.5, 2.5))
-                    # Click the visible primary button
-                    page.locator('button[class*="primary"]:has-text("使用"):visible').first.click(timeout=5000)
-                    print(f"已选择第 {idx + 1} 个音乐")
+                        page.mouse.move(cx + 5, cy + 2)
+                        time.sleep(2)
+                    # Find and click the visible button
+                    btns = page.locator('button[class*="primary"]:has-text("使用")').all()
+                    for btn in btns:
+                        if btn.is_visible():
+                            btn.click()
+                            print(f"已选择第 {idx + 1} 个音乐")
+                            break
                     time.sleep(2)
-                    # Close music panel by clicking X button
-                    close_btn = page.locator('[class*="sidesheet"] [class*="close"], [class*="sidesheet"] svg').first
-                    if close_btn.count() > 0:
-                        close_btn.click()
-                    time.sleep(1)
                 except Exception as e:
                     print(f"音乐选择失败: {e}")
 
@@ -188,14 +141,14 @@ def cmd_post(args):
             if args.debug:
                 input("按 Enter 继续...")
             else:
-                # Close any open panel first
-                mask = page.locator('[class*="sidesheet-mask"]')
-                if mask.count() > 0:
-                    mask.first.click()
+                # Close any open panel first (click X button)
+                close_btn = page.locator('[class*="semi-icons-close"]')
+                if close_btn.count() > 0 and close_btn.first.is_visible():
+                    close_btn.first.click()
                     time.sleep(1)
-                # Click 发布 button
+                # Click 发布 button (the one in header, not 高清发布)
                 print("点击发布...")
-                publish_btn = page.locator('button:has-text("发布")').first
+                publish_btn = page.locator('button:has-text("发布"):not(:has-text("高清"))').first
                 publish_btn.click(timeout=10000)
                 time.sleep(3)
                 print("已发布")
@@ -203,6 +156,22 @@ def cmd_post(args):
         except Exception as e:
             print(f"错误: {e}")
             sys.exit(1)
+
+
+def cmd_share(args):
+    """分享内容到抖音（自动去除敏感词，生成视频）"""
+    import feed_share
+    
+    # 构建参数
+    sys.argv = ['feed_share', args.title, args.content]
+    if args.post:
+        sys.argv.append('--post')
+    if args.hotspot:
+        sys.argv.extend(['--hotspot', args.hotspot])
+    if args.voice:
+        sys.argv.extend(['--voice', args.voice])
+    
+    feed_share.main()
 
 
 def main():
@@ -218,14 +187,23 @@ def main():
     p_music.add_argument("text", help="要转换的文字")
     p_music.add_argument("--voice", default=DEFAULT_VOICE, help="TTS 声音")
 
-    # post
-    p_post = sub.add_parser("post", help="发布到抖音")
+    # post (图片)
+    p_post = sub.add_parser("post", help="发布图片到抖音")
     p_post.add_argument("images", nargs="+", help="图片文件")
     p_post.add_argument("-t", "--title", default="", help="标题")
     p_post.add_argument("-d", "--description", default="", help="描述")
-    p_post.add_argument("-m", "--music", help="选择音乐")
+    p_post.add_argument("-m", "--music", nargs="?", const="auto", default="auto", help="选择音乐 (默认自动选择，--no-music 禁用)")
+    p_post.add_argument("--no-music", dest="music", action="store_false", help="不选择音乐")
     p_post.add_argument("--hotspot", help="关联热点")
     p_post.add_argument("--debug", action="store_true", help="调试模式")
+
+    # share (视频 - 从文字生成)
+    p_share = sub.add_parser("share", help="分享内容到抖音（生成视频）")
+    p_share.add_argument("title", help="视频标题")
+    p_share.add_argument("content", help="视频内容（TTS 文本）")
+    p_share.add_argument("--post", action="store_true", help="自动发布")
+    p_share.add_argument("--hotspot", help="关联热点")
+    p_share.add_argument("--voice", default=DEFAULT_VOICE, help="TTS 语音")
 
     args = parser.parse_args()
 
@@ -235,6 +213,8 @@ def main():
         cmd_music(args)
     elif args.cmd == "post":
         cmd_post(args)
+    elif args.cmd == "share":
+        cmd_share(args)
     else:
         parser.print_help()
 
