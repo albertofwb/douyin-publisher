@@ -319,8 +319,17 @@ def gen_subtitles(text: str, duration: float, output: Path) -> Path:
     return output
 
 
-def gen_video(image: Path, audio: Path, output: Path, subtitles: Path = None) -> bool:
-    """合成视频（静态图片 + 音频 + 可选字幕）"""
+def gen_video(image: Path, audio: Path, output: Path, subtitles: Path = None, bgm: Path = None, bgm_volume: float = 0.15) -> bool:
+    """合成视频（静态图片 + 音频 + 可选字幕 + 可选背景音乐）
+    
+    Args:
+        image: 封面图片
+        audio: TTS 语音
+        output: 输出视频路径
+        subtitles: 字幕文件 (SRT)
+        bgm: 背景音乐文件（会循环播放）
+        bgm_volume: 背景音乐音量 (0.0-1.0)，默认 0.15
+    """
     # 获取音频时长
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -334,25 +343,28 @@ def gen_video(image: Path, audio: Path, output: Path, subtitles: Path = None) ->
     duration = float(probe.stdout.strip())
     
     # 构建 ffmpeg 命令
-    cmd = [
-        "ffmpeg", "-y",
+    inputs = [
         "-loop", "1",
         "-i", str(image),
         "-i", str(audio),
     ]
     
-    # 如果有字幕，添加字幕滤镜
+    # 如果有背景音乐，添加为第三个输入（循环播放）
+    if bgm and bgm.exists():
+        inputs.extend(["-stream_loop", "-1", "-i", str(bgm)])
+    
+    cmd = ["ffmpeg", "-y"] + inputs
+    
+    # 视频滤镜（字幕）
+    video_filter = None
     if subtitles and subtitles.exists():
-        # 复制字幕到临时文件（避免中文路径问题）
         import shutil
         import tempfile
         temp_srt = Path(tempfile.gettempdir()) / "temp_subtitles.srt"
         shutil.copy(subtitles, temp_srt)
         
-        # 字幕样式：居中，白色大字，黑色描边
-        # 注意：路径中的特殊字符需要转义
         srt_path_escaped = str(temp_srt).replace('\\', '/').replace(':', '\\:')
-        subtitle_filter = (
+        video_filter = (
             f"subtitles={srt_path_escaped}:force_style='"
             f"FontSize=48,"
             f"FontName=Noto Sans CJK SC,"
@@ -360,10 +372,21 @@ def gen_video(image: Path, audio: Path, output: Path, subtitles: Path = None) ->
             f"OutlineColour=&H000000,"
             f"Outline=3,"
             f"Shadow=1,"
-            f"Alignment=5,"  # 5=居中（屏幕正中央）
-            f"MarginL=0,MarginR=0,MarginV=0'"  # 清除所有边距
+            f"Alignment=5,"
+            f"MarginL=0,MarginR=0,MarginV=0'"
         )
-        cmd.extend(["-vf", subtitle_filter])
+    
+    if video_filter:
+        cmd.extend(["-vf", video_filter])
+    
+    # 音频滤镜（混合背景音乐）
+    if bgm and bgm.exists():
+        # 混合 TTS (音轨1) 和 BGM (音轨2)
+        # TTS 保持原音量，BGM 降低音量
+        audio_filter = f"[1:a]volume=1.0[tts];[2:a]volume={bgm_volume}[bgm];[tts][bgm]amix=inputs=2:duration=first[aout]"
+        cmd.extend(["-filter_complex", audio_filter, "-map", "0:v", "-map", "[aout]"])
+    else:
+        cmd.extend(["-map", "0:v", "-map", "1:a"])
     
     cmd.extend([
         "-c:v", "libx264",
@@ -383,6 +406,10 @@ def gen_video(image: Path, audio: Path, output: Path, subtitles: Path = None) ->
         return False
     
     return True
+
+
+# 默认背景音乐路径
+DEFAULT_BGM = Path(__file__).parent / "assets" / "bgm_ambient.mp3"
 
 
 def get_audio_duration(audio: Path) -> float:
@@ -578,6 +605,9 @@ def main():
     parser.add_argument("--voice", default=DEFAULT_VOICE, help="TTS 语音")
     parser.add_argument("--no-sanitize", action="store_true", help="不过滤敏感词")
     parser.add_argument("--debug", action="store_true", help="调试模式（发布前暂停）")
+    parser.add_argument("--bgm", type=Path, default=DEFAULT_BGM, help="背景音乐文件")
+    parser.add_argument("--bgm-volume", type=float, default=0.15, help="背景音乐音量 (0.0-1.0)")
+    parser.add_argument("--no-bgm", action="store_true", help="不使用背景音乐")
     
     args = parser.parse_args()
     
@@ -633,10 +663,13 @@ def main():
             vtt_to_srt(vtt, subtitles)
     print(f"   字幕: {subtitles}")
     
-    # 4. 合成视频（带字幕）
+    # 4. 合成视频（带字幕 + 可选背景音乐）
     print("🎬 合成视频...")
     video = post_dir / "video.mp4"
-    if not gen_video(cover, audio, video, subtitles):
+    bgm = None if args.no_bgm else args.bgm
+    if bgm and bgm.exists():
+        print(f"   背景音乐: {bgm.name} (音量 {args.bgm_volume})")
+    if not gen_video(cover, audio, video, subtitles, bgm, args.bgm_volume):
         sys.exit(1)
     print(f"   视频: {video}")
     
